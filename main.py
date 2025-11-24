@@ -125,7 +125,10 @@ class ParallaxLauncher(ctk.CTk):
         self.detected_peer_id = ctk.StringVar(value="等待生成 / Waiting...")
         self.chat_service_status = ctk.StringVar(value="未启动 / Stopped")
         
-        self.show_loading_page("系统初始化中...\nINITIALIZING...")
+        # [新增] 动态 loading 文本变量
+        self.loading_text = ctk.StringVar(value="系统初始化中...\nINITIALIZING...")
+
+        self.show_loading_page()
         self.after(100, self.startup_sequence)
 
     # --- 图片加载 ---
@@ -200,13 +203,16 @@ class ParallaxLauncher(ctk.CTk):
     def clear_frame(self):
         for widget in self.winfo_children(): widget.destroy()
 
-    def show_loading_page(self, message):
+    def show_loading_page(self):
         self.clear_frame()
         loading_frame = ctk.CTkFrame(self, fg_color="transparent")
         loading_frame.pack(expand=True)
         pixel_art = pixel_font.get_text_3d("PARALLAX")
         ctk.CTkLabel(loading_frame, text=pixel_art, font=FONT_LOGO_BIG, text_color="#444").pack(pady=10)
-        ctk.CTkLabel(loading_frame, text=message, font=FONT_CN_NORMAL, text_color="#333").pack(pady=10)
+        
+        # [修改] 使用动态文本变量，显示当前步骤
+        ctk.CTkLabel(loading_frame, textvariable=self.loading_text, font=FONT_CN_NORMAL, text_color="#333").pack(pady=10)
+        
         self.loading_bar = ctk.CTkProgressBar(loading_frame, width=350, height=12, corner_radius=0, progress_color="#444")
         self.loading_bar.pack(pady=20)
         self.loading_bar.configure(mode="indeterminate")
@@ -215,27 +221,36 @@ class ParallaxLauncher(ctk.CTk):
     def start_async_check(self):
         threading.Thread(target=self._run_async_check_logic, daemon=True).start()
 
-    # --- 核心检测逻辑 ---
+    # --- 核心检测逻辑 (带实时播报) ---
     def _run_async_check_logic(self):
+        # 辅助函数：更新界面文字
+        def update_status(text):
+            self.after(0, lambda: self.loading_text.set(text))
+
         # 1. 检测 WSL
+        update_status("正在检测 WSL 环境...\nChecking WSL Subsystem...")
         wsl_ready = self.check_wsl_ready()
         if not wsl_ready:
             self.after(0, self.show_wsl_setup_page)
             return
 
         # 2. 检测 Parallax CLI
+        update_status("正在检测 Parallax 程序...\nChecking Parallax CLI...")
         has_cli = shutil.which("parallax") is not None
         if not has_cli:
             self.after(0, self.show_download_guide_page)
             return
 
-        # 3. 检测依赖 (使用 check 确保依赖正常)
+        # 3. 检测依赖
+        update_status("正在验证 AI 运行依赖 (可能需要几秒)...\nVerifying Dependencies (May take time)...")
         deps_ready = self.check_parallax_deps_strict()
         if not deps_ready:
             self.after(0, self.show_dependency_install_page)
             return
 
         # 4. All Pass
+        update_status("检测完成，即将进入...\nAll Systems Ready.")
+        time.sleep(0.5) # 给用户看一眼成功状态
         self.after(0, self.show_role_selection)
 
     def kill_process_tree(self, proc):
@@ -272,6 +287,7 @@ class ParallaxLauncher(ctk.CTk):
     # 严格依赖检测
     def check_parallax_deps_strict(self):
         try: 
+            # parallax check 可能会比较慢，所以加了状态提示
             return subprocess.run("parallax check", shell=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, creationflags=0x08000000).returncode == 0
         except: return False
 
@@ -287,7 +303,7 @@ class ParallaxLauncher(ctk.CTk):
         except Exception as e:
             self.append_log(f"Refresh Env Failed: {e}\n")
 
-    # --- 页面：WSL 安装 (Step 1) [修正版：显示输出] ---
+    # --- 页面：WSL 安装 (Step 1) ---
     def show_wsl_setup_page(self):
         self.clear_frame()
         header = ctk.CTkFrame(self, fg_color="transparent")
@@ -337,7 +353,6 @@ class ParallaxLauncher(ctk.CTk):
     def run_wsl_install(self):
         self.append_log(">>> Launching WSL Installer...\n")
         try:
-            # 使用系统编码，捕获输出并显示在 UI
             sys_encoding = locale.getpreferredencoding()
             process = subprocess.Popen(
                 "wsl --install -d Ubuntu-22.04", 
@@ -423,22 +438,22 @@ class ParallaxLauncher(ctk.CTk):
         except Exception as e: self.append_log(f"Error: {e}\n")
 
     # --- 页面：依赖配置 (Step 3) ---
-    def show_dependency_install_page(self):
+    def show_environment_install_page(self):
         self.clear_frame()
         header = ctk.CTkFrame(self, fg_color="transparent")
         header.pack(pady=(50, 30))
-        self.create_pixel_header(header, "STEP 3: DEPS", big=True).pack()
-        ctk.CTkLabel(header, text="配置 AI 环境", font=FONT_CN_BOLD, text_color=COLOR_TEXT).pack(pady=(10, 0))
+        self.create_pixel_header(header, "STEP 2: ENV", big=True).pack()
+        ctk.CTkLabel(header, text="配置系统环境 (WSL + AI)", font=FONT_CN_BOLD, text_color=COLOR_TEXT).pack(pady=(10, 0))
 
         content = ctk.CTkFrame(self, fg_color="white", border_width=2, border_color="#ccc", corner_radius=0)
         content.pack(padx=50, fill="x")
         
-        ctk.CTkLabel(content, text="基础程序已就绪。现在需要安装 AI 运行库 (torch 等)。\nEnvironment configuration required.", font=FONT_CN_NORMAL, text_color="#555").pack(pady=20)
+        ctk.CTkLabel(content, text="正在调用官方脚本自动安装 WSL, Ubuntu 及 AI 依赖。\nInstalling all dependencies (WSL, Ubuntu, Drivers)...", font=FONT_CN_NORMAL, text_color="#555").pack(pady=20)
 
-        self.log_textbox = ctk.CTkTextbox(content, width=600, height=200, font=FONT_EN_PIXEL, fg_color="#eee", text_color="#333")
-        self.log_textbox.pack(pady=20)
+        self.log_textbox = ctk.CTkTextbox(content, width=600, height=250, font=FONT_EN_PIXEL, fg_color="#eee", text_color="#333")
+        self.log_textbox.pack(pady=10)
         
-        self.install_btn = ctk.CTkButton(self, text="🚀 开始配置 / START", font=("Microsoft YaHei UI", 14, "bold"), 
+        self.install_btn = ctk.CTkButton(self, text="🚀 一键开始配置 / START SETUP", font=("Microsoft YaHei UI", 14, "bold"), 
                                          fg_color="#333", hover_color="#111", height=50, width=250, corner_radius=0,
                                          command=self.start_install_thread)
         self.install_btn.pack(pady=30)
@@ -449,17 +464,33 @@ class ParallaxLauncher(ctk.CTk):
 
     def run_install_command(self):
         self.append_log(">>> Executing: parallax install\n")
-        self.append_log(">>> This may take a while (installing python env)...\n")
+        self.append_log(">>> This script handles everything (WSL, Ubuntu, Nvidia Drivers, etc.)\n")
+        self.append_log(">>> Please wait, do not close the window.\n")
+        
         try:
-            process = subprocess.Popen("parallax install", shell=True, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, encoding=locale.getpreferredencoding(), errors='replace', creationflags=subprocess.CREATE_NO_WINDOW)
-            for line in process.stdout: self.append_log(line)
+            sys_encoding = locale.getpreferredencoding()
+            process = subprocess.Popen(
+                "parallax install", 
+                shell=True, 
+                stdout=subprocess.PIPE, 
+                stderr=subprocess.STDOUT, 
+                text=True, 
+                encoding=sys_encoding, 
+                errors='replace', 
+                creationflags=subprocess.CREATE_NO_WINDOW
+            )
+            
+            for line in process.stdout: 
+                self.append_log(line)
+            
             process.wait()
             
             if process.returncode == 0:
-                self.append_log("\n>>> Configuration Complete!\n")
+                self.append_log("\n>>> Installation SUCCESSFUL!\n")
+                self.append_log(">>> Verifying environment...\n")
                 self.after(2000, self.start_async_check) 
             else:
-                self.append_log("\n[Error] Installation failed.\n")
+                self.append_log(f"\n[Error] Installation failed with code {process.returncode}.\n")
                 self.install_btn.configure(state="normal")
         except Exception as e:
             self.append_log(f"Error: {e}\n")
