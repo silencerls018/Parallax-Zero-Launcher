@@ -12,7 +12,8 @@ import traceback
 import locale
 import urllib.request
 import time
-import winreg 
+import winreg
+import configparser # [新增] 用于安全读写 INI 配置文件
 from PIL import Image 
 
 # --- 关键修复：设置 Windows 任务栏图标 ---
@@ -21,6 +22,14 @@ try:
     ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID(myappid)
 except:
     pass
+
+# --- 关键修复：资源路径定位函数 ---
+def resource_path(relative_path):
+    try:
+        base_path = sys._MEIPASS
+    except Exception:
+        base_path = os.path.abspath(".")
+    return os.path.join(base_path, relative_path)
 
 # --- 风格配置 ---
 ctk.set_appearance_mode("Light")
@@ -113,8 +122,9 @@ class ParallaxLauncher(ctk.CTk):
         self.resizable(True, True)
         self.configure(fg_color=COLOR_BG)
 
-        if os.path.exists("app.ico"):
-            try: self.iconbitmap("app.ico")
+        icon_path = resource_path("app.ico")
+        if os.path.exists(icon_path):
+            try: self.iconbitmap(icon_path)
             except: pass
 
         self.process = None      
@@ -124,17 +134,15 @@ class ParallaxLauncher(ctk.CTk):
         self.protocol("WM_DELETE_WINDOW", self.on_closing)
         self.detected_peer_id = ctk.StringVar(value="等待生成 / Waiting...")
         self.chat_service_status = ctk.StringVar(value="未启动 / Stopped")
-        
-        # [新增] 动态 loading 文本变量
         self.loading_text = ctk.StringVar(value="系统初始化中...\nINITIALIZING...")
-
-        self.show_loading_page()
+        
+        self.show_loading_page("系统初始化中...\nINITIALIZING...")
         self.after(100, self.startup_sequence)
 
-    # --- 图片加载 ---
     def load_image(self, path, size=(64, 64)):
-        if os.path.exists(path):
-            try: return ctk.CTkImage(Image.open(path), size=size)
+        real_path = resource_path(path)
+        if os.path.exists(real_path):
+            try: return ctk.CTkImage(Image.open(real_path), size=size)
             except: pass
         return None
 
@@ -203,16 +211,13 @@ class ParallaxLauncher(ctk.CTk):
     def clear_frame(self):
         for widget in self.winfo_children(): widget.destroy()
 
-    def show_loading_page(self):
+    def show_loading_page(self, message="系统初始化中...\nINITIALIZING..."):
         self.clear_frame()
         loading_frame = ctk.CTkFrame(self, fg_color="transparent")
         loading_frame.pack(expand=True)
         pixel_art = pixel_font.get_text_3d("PARALLAX")
         ctk.CTkLabel(loading_frame, text=pixel_art, font=FONT_LOGO_BIG, text_color="#444").pack(pady=10)
-        
-        # [修改] 使用动态文本变量，显示当前步骤
         ctk.CTkLabel(loading_frame, textvariable=self.loading_text, font=FONT_CN_NORMAL, text_color="#333").pack(pady=10)
-        
         self.loading_bar = ctk.CTkProgressBar(loading_frame, width=350, height=12, corner_radius=0, progress_color="#444")
         self.loading_bar.pack(pady=20)
         self.loading_bar.configure(mode="indeterminate")
@@ -221,36 +226,30 @@ class ParallaxLauncher(ctk.CTk):
     def start_async_check(self):
         threading.Thread(target=self._run_async_check_logic, daemon=True).start()
 
-    # --- 核心检测逻辑 (带实时播报) ---
     def _run_async_check_logic(self):
-        # 辅助函数：更新界面文字
         def update_status(text):
             self.after(0, lambda: self.loading_text.set(text))
 
-        # 1. 检测 WSL
         update_status("正在检测 WSL 环境...\nChecking WSL Subsystem...")
         wsl_ready = self.check_wsl_ready()
         if not wsl_ready:
             self.after(0, self.show_wsl_setup_page)
             return
 
-        # 2. 检测 Parallax CLI
         update_status("正在检测 Parallax 程序...\nChecking Parallax CLI...")
         has_cli = shutil.which("parallax") is not None
         if not has_cli:
             self.after(0, self.show_download_guide_page)
             return
 
-        # 3. 检测依赖
-        update_status("正在验证 AI 运行依赖 (可能需要几秒)...\nVerifying Dependencies (May take time)...")
+        update_status("正在验证 AI 运行依赖...\nVerifying Dependencies...")
         deps_ready = self.check_parallax_deps_strict()
         if not deps_ready:
-            self.after(0, self.show_dependency_install_page)
+            self.after(0, self.show_environment_install_page)
             return
 
-        # 4. All Pass
         update_status("检测完成，即将进入...\nAll Systems Ready.")
-        time.sleep(0.5) # 给用户看一眼成功状态
+        time.sleep(0.5)
         self.after(0, self.show_role_selection)
 
     def kill_process_tree(self, proc):
@@ -284,14 +283,11 @@ class ParallaxLauncher(ctk.CTk):
         try: return subprocess.run("wsl -l -v", shell=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, creationflags=0x08000000).returncode == 0
         except: return False
 
-    # 严格依赖检测
     def check_parallax_deps_strict(self):
         try: 
-            # parallax check 可能会比较慢，所以加了状态提示
             return subprocess.run("parallax check", shell=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, creationflags=0x08000000).returncode == 0
         except: return False
 
-    # --- 刷新环境变量 ---
     def refresh_path(self):
         try:
             with winreg.OpenKey(winreg.HKEY_CURRENT_USER, r'Environment') as key:
@@ -303,90 +299,76 @@ class ParallaxLauncher(ctk.CTk):
         except Exception as e:
             self.append_log(f"Refresh Env Failed: {e}\n")
 
-    # --- 页面：WSL 安装 (Step 1) ---
-    def show_wsl_setup_page(self):
-        self.clear_frame()
-        header = ctk.CTkFrame(self, fg_color="transparent")
-        header.pack(pady=(50, 30))
-        self.create_pixel_header(header, "STEP 1: WSL", big=True).pack()
-        ctk.CTkLabel(header, text="WSL 环境准备", font=FONT_CN_BOLD, text_color=COLOR_TEXT).pack(pady=(10, 0))
+    # --- [新增] WSL 智能修复逻辑 ---
+    def check_wsl_config(self):
+        """检查是否开启了镜像模式，兼容旧版 Windows"""
+        win_ver = sys.getwindowsversion()
+        # 镜像模式需要 Win11 22H2 (Build 22621) 以上
+        if win_ver.build < 22621: 
+            return False, "System Version Too Low"
+            
+        config_path = os.path.expanduser("~/.wslconfig")
+        is_configured = False
+        
+        # 如果文件存在，解析它
+        if os.path.exists(config_path):
+            try:
+                config = configparser.ConfigParser()
+                config.read(config_path)
+                if config.has_section("wsl2"):
+                    mode = config.get("wsl2", "networkingMode", fallback="")
+                    if mode.strip().lower() == "mirrored":
+                        is_configured = True
+            except: pass
+            
+        return is_configured, config_path
 
-        content = ctk.CTkFrame(self, fg_color="white", border_width=2, border_color="#ccc", corner_radius=0)
-        content.pack(padx=50, fill="x")
-        ctk.CTkLabel(content, text="检测到系统未安装 WSL。这是运行本地 AI 的基础组件。\nWSL environment is missing.", font=FONT_CN_NORMAL, text_color="#d35400").pack(pady=20)
-        
-        self.log_textbox = ctk.CTkTextbox(content, width=600, height=150, font=FONT_EN_PIXEL, fg_color="#eee", text_color="#333")
-        self.log_textbox.pack(pady=10)
-        
-        btn_frame = ctk.CTkFrame(self, fg_color="transparent")
-        btn_frame.pack(pady=30)
-        
-        self.wsl_btn = ctk.CTkButton(btn_frame, text="🐧 一键安装 Ubuntu 22.04", font=("Microsoft YaHei UI", 14, "bold"),
-                                     fg_color="#333", hover_color="#111", height=45, width=250, corner_radius=0,
-                                     command=self.start_wsl_install_thread)
-        self.wsl_btn.pack(side="left", padx=10)
-        
-        self.wsl_next_btn = ctk.CTkButton(btn_frame, text="验证并下一步 >", font=("Microsoft YaHei UI", 14, "bold"),
-                                          fg_color="#27ae60", height=45, width=200, corner_radius=0, 
-                                          command=self.verify_wsl_and_proceed) 
-        self.wsl_next_btn.pack(side="left", padx=10)
-
-    def verify_wsl_and_proceed(self):
-        self.log_textbox.configure(state="normal")
-        self.log_textbox.insert("end", ">>> Verifying WSL status...\n")
-        self.log_textbox.see("end")
-        self.log_textbox.configure(state="disabled")
-        self.update()
-        
-        if self.check_wsl_ready():
-            self.log_textbox.configure(state="normal")
-            self.log_textbox.insert("end", ">>> WSL Check Passed! Moving next...\n")
-            self.log_textbox.configure(state="disabled")
-            self.after(1000, self.start_async_check) 
-        else:
-            ctypes.windll.user32.MessageBoxW(0, "未检测到 WSL 或 Ubuntu。\n如果您刚完成安装，请尝试重启电脑。", "Check Failed", 0x10)
-
-    def start_wsl_install_thread(self):
-        self.wsl_btn.configure(state="disabled")
-        threading.Thread(target=self.run_wsl_install, daemon=True).start()
-
-    def run_wsl_install(self):
-        self.append_log(">>> Launching WSL Installer...\n")
+    def fix_wsl_network(self):
+        """合并配置并重启"""
         try:
-            sys_encoding = locale.getpreferredencoding()
-            process = subprocess.Popen(
-                "wsl --install -d Ubuntu-22.04", 
-                shell=True, 
-                stdout=subprocess.PIPE, 
-                stderr=subprocess.STDOUT, 
-                text=True, 
-                encoding=sys_encoding, 
-                errors='replace', 
-                creationflags=subprocess.CREATE_NO_WINDOW
-            )
+            config_path = os.path.expanduser("~/.wslconfig")
+            config = configparser.ConfigParser()
+            # 保持键的大小写敏感（虽然 Windows 不敏感，但为了整洁）
+            config.optionxform = str 
             
-            for line in process.stdout:
-                self.append_log(line)
+            # 读取现有配置（如果存在）
+            if os.path.exists(config_path):
+                try: config.read(config_path)
+                except: pass # 如果文件损坏，ConfigParser 会报错，忽略并新建
             
-            process.wait()
+            if not config.has_section("wsl2"):
+                config.add_section("wsl2")
             
-            if process.returncode == 0:
-                self.append_log("\n>>> WSL Install command finished successfully.\n")
-                self.append_log(">>> IMPORTANT: You may need to RESTART your computer.\n")
-            else:
-                self.append_log(f"\n>>> Install failed with code {process.returncode}.\n")
-                self.wsl_btn.configure(state="normal")
-                
+            # 强制更新网络相关设置
+            updates = {
+                "networkingMode": "mirrored",
+                "dnsTunneling": "true",
+                "firewall": "true",
+                "autoProxy": "true"
+            }
+            
+            for k, v in updates.items():
+                config.set("wsl2", k, v)
+            
+            # 写入文件
+            with open(config_path, "w") as f:
+                config.write(f)
+            
+            # 重启 WSL 生效
+            subprocess.Popen("wsl --shutdown", shell=True, creationflags=0x08000000)
+            
+            ctypes.windll.user32.MessageBoxW(0, "已智能合并配置并重启 WSL。\n网络镜像模式已开启，原有其他设置已保留。", "修复成功", 0x40)
+            return True
         except Exception as e:
-            self.append_log(f"Error: {e}\n")
-            self.wsl_btn.configure(state="normal")
+            ctypes.windll.user32.MessageBoxW(0, f"修复失败: {str(e)}", "错误", 0x10)
+            return False
 
-    # --- 页面：下载引导 (Step 2) ---
+    # --- 页面：下载引导 (Step 1) ---
     def show_download_guide_page(self):
         self.clear_frame()
         header = ctk.CTkFrame(self, fg_color="transparent")
         header.pack(pady=(50, 30))
-        self.create_pixel_header(header, "STEP 2: CLI", big=True).pack()
+        self.create_pixel_header(header, "STEP 1: CLI", big=True).pack()
         ctk.CTkLabel(header, text="安装基础程序", font=FONT_CN_BOLD, text_color=COLOR_TEXT).pack(pady=(10, 0))
 
         content = ctk.CTkFrame(self, fg_color="white", border_width=2, border_color="#ccc", corner_radius=0)
@@ -437,23 +419,23 @@ class ParallaxLauncher(ctk.CTk):
             subprocess.Popen(save_path, shell=True)
         except Exception as e: self.append_log(f"Error: {e}\n")
 
-    # --- 页面：依赖配置 (Step 3) ---
+    # --- 页面：环境配置 (Step 2) ---
     def show_environment_install_page(self):
         self.clear_frame()
         header = ctk.CTkFrame(self, fg_color="transparent")
         header.pack(pady=(50, 30))
         self.create_pixel_header(header, "STEP 2: ENV", big=True).pack()
-        ctk.CTkLabel(header, text="配置系统环境 (WSL + AI)", font=FONT_CN_BOLD, text_color=COLOR_TEXT).pack(pady=(10, 0))
+        ctk.CTkLabel(header, text="一键配置全套环境", font=FONT_CN_BOLD, text_color=COLOR_TEXT).pack(pady=(10, 0))
 
         content = ctk.CTkFrame(self, fg_color="white", border_width=2, border_color="#ccc", corner_radius=0)
         content.pack(padx=50, fill="x")
         
-        ctk.CTkLabel(content, text="正在调用官方脚本自动安装 WSL, Ubuntu 及 AI 依赖。\nInstalling all dependencies (WSL, Ubuntu, Drivers)...", font=FONT_CN_NORMAL, text_color="#555").pack(pady=20)
+        ctk.CTkLabel(content, text="官方脚本将自动安装 WSL, Ubuntu, CUDA 等所有依赖。\n此过程可能耗时较长，请保持网络通畅。", font=FONT_CN_NORMAL, text_color="#555").pack(pady=20)
 
-        self.log_textbox = ctk.CTkTextbox(content, width=600, height=250, font=FONT_EN_PIXEL, fg_color="#eee", text_color="#333")
-        self.log_textbox.pack(pady=10)
+        self.log_textbox = ctk.CTkTextbox(content, width=600, height=300, font=FONT_EN_PIXEL, fg_color="#eee", text_color="#333")
+        self.log_textbox.pack(pady=20)
         
-        self.install_btn = ctk.CTkButton(self, text="🚀 一键开始配置 / START SETUP", font=("Microsoft YaHei UI", 14, "bold"), 
+        self.install_btn = ctk.CTkButton(self, text="🚀 开始全自动配置 / START", font=("Microsoft YaHei UI", 14, "bold"), 
                                          fg_color="#333", hover_color="#111", height=50, width=250, corner_radius=0,
                                          command=self.start_install_thread)
         self.install_btn.pack(pady=30)
@@ -464,9 +446,7 @@ class ParallaxLauncher(ctk.CTk):
 
     def run_install_command(self):
         self.append_log(">>> Executing: parallax install\n")
-        self.append_log(">>> This script handles everything (WSL, Ubuntu, Nvidia Drivers, etc.)\n")
-        self.append_log(">>> Please wait, do not close the window.\n")
-        
+        self.append_log(">>> This handles WSL, Ubuntu, Drivers, and AI libs...\n")
         try:
             sys_encoding = locale.getpreferredencoding()
             process = subprocess.Popen(
@@ -479,15 +459,13 @@ class ParallaxLauncher(ctk.CTk):
                 errors='replace', 
                 creationflags=subprocess.CREATE_NO_WINDOW
             )
-            
             for line in process.stdout: 
                 self.append_log(line)
-            
             process.wait()
             
             if process.returncode == 0:
                 self.append_log("\n>>> Installation SUCCESSFUL!\n")
-                self.append_log(">>> Verifying environment...\n")
+                self.append_log(">>> Re-verifying environment...\n")
                 self.after(2000, self.start_async_check) 
             else:
                 self.append_log(f"\n[Error] Installation failed with code {process.returncode}.\n")
@@ -561,6 +539,21 @@ class ParallaxLauncher(ctk.CTk):
             ctk.CTkButton(info_box, text="🌐 打开管理后台 / Dashboard", font=("Microsoft YaHei UI", 12), 
                           fg_color="#2c3e50", hover_color="#34495e", height=40, corner_radius=0,
                           command=lambda: webbrowser.open("http://localhost:3001")).pack(fill="x", pady=15)
+            
+            # [恢复] WSL 网络修复面板
+            ctk.CTkLabel(right_col, text=" NETWORK ", font=("Consolas", 12), fg_color="#ccc", text_color="#333", corner_radius=0).pack(fill="x", anchor="w")
+            net_box = ctk.CTkFrame(right_col, fg_color="transparent")
+            net_box.pack(fill="x", padx=15, pady=15)
+            
+            wsl_ok, _ = self.check_wsl_config()
+            if not wsl_ok:
+                ctk.CTkLabel(net_box, text="⚠️ WSL 网络隔离中", text_color="orange", font=("Microsoft YaHei UI", 12, "bold")).pack(anchor="w")
+                ctk.CTkButton(net_box, text="🛠️ 一键修复 (Fix Network)", font=("Microsoft YaHei UI", 12),
+                              fg_color="orange", text_color="black", hover_color="#ff9900", height=30,
+                              command=lambda: self.fix_wsl_network() and net_box.destroy()).pack(fill="x", pady=5)
+            else:
+                ctk.CTkLabel(net_box, text="✅ 网络模式：镜像 (Mirrored)", text_color="green", font=("Microsoft YaHei UI", 12)).pack(anchor="w")
+
             ctk.CTkLabel(right_col, text=" SERVICES ", font=("Consolas", 12), fg_color="#ccc", text_color="#333", corner_radius=0).pack(fill="x", anchor="w")
             svc_box = ctk.CTkFrame(right_col, fg_color="transparent")
             svc_box.pack(fill="x", padx=15, pady=15)
